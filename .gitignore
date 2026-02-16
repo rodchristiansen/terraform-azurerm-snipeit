@@ -32,3 +32,20 @@ override.tf.json
 # Ignore CLI configuration files
 .terraformrc
 terraform.rc
+
+# Ignore generated certificate file
+DigiCertGlobalRootCA.crt.pem
+
+# Ignore lock file (can be committed if desired)
+.terraform.lock.hcl
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -1,0 +1,46 @@
+# Example Terraform variables file for Snipe-IT Azure deployment
+# Copy this file to terraform.tfvars and update with your values
+
+# Basic Configuration
+resource_group_name = "snipeit-rg"
+location            = "Canada Central"
+app_name_prefix     = "snipeit"
+app_url             = "https://assets.company.com"
+environment         = "production"
+
+# Application Settings
+app_timezone = "America/Vancouver"
+app_locale   = "en-US"
+app_debug    = false
+
+# MySQL Configuration
+mysql_admin_username = "snipeitadmin"
+mysql_sku_name       = "B_Standard_B1ms"  # Options: B_Standard_B1s, B_Standard_B1ms, GP_Standard_D2ds_v4, etc.
+mysql_version        = "8.0.21"
+mysql_database_name  = "snipeit"
+
+# Storage Configuration  
+storage_account_replication_type = "LRS"  # Options: LRS, GRS, RAGRS, ZRS, GZRS, RAGZRS
+storage_share_quota              = 50    # Size in GB
+
+# App Service Configuration
+app_service_sku = "B2"  # Options: B1, B2, B3, S1, S2, S3, P1v2, P2v2, P3v2, etc.
+docker_image    = "index.docker.io/snipe/snipe-it:latest"
+
+# Mail Configuration (SendGrid)
+sendgrid_enabled  = true
+mail_from_address = "noreply@company.com"
+mail_from_name    = "Snipe-IT Admin"
+
+# Network Configuration (optional - defaults provided)
+# vnet_address_space  = ["10.0.0.0/16"]
+# app_subnet_prefix   = ["10.0.2.0/24"]
+# mysql_subnet_prefix = ["10.0.3.0/24"]
+
+# Tags
+tags = {
+  Environment = "Production"
+  ManagedBy   = "Terraform"
+  Project     = "Snipe-IT"
+  CostCenter  = "IT"
+}

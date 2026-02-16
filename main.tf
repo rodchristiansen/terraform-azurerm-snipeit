@@ -1,7 +1,13 @@
-# Set your URL here
+# Generate random suffix for globally unique resource names
+resource "random_id" "suffix" {
+  byte_length = 4
+}
+
 locals {
-  app_name = "assets-inventory-company"
-  app_url  = "https://assets.inventory.company.com"
+  # Generate globally unique names by combining prefix with random suffix
+  app_name            = "${var.app_name_prefix}-${random_id.suffix.hex}"
+  storage_account_name = lower(replace("${var.app_name_prefix}${random_id.suffix.hex}", "-", ""))
+  key_vault_name      = "${var.app_name_prefix}-kv-${random_id.suffix.hex}"
 }
 
 # Data Source to fetch the current client config
@@ -9,27 +15,26 @@ data "azurerm_client_config" "current" {}
 
 # Resource Group
 resource "azurerm_resource_group" "assets" {
-  name     = "Inventory"
-  location = "Canada Central"
-  tags = {
-    GitOps = "Terraformed"
-  }
+  name     = var.resource_group_name
+  location = var.location
+  tags     = var.tags
 }
 
 # Virtual Network
 resource "azurerm_virtual_network" "assets_vnet" {
-  name                = "assets-vnet"
-  address_space       = ["10.0.0.0/16"]
+  name                = "${var.app_name_prefix}-vnet"
+  address_space       = var.vnet_address_space
   location            = azurerm_resource_group.assets.location
   resource_group_name = azurerm_resource_group.assets.name
+  tags                = var.tags
 }
 
 # Subnet for general assets
 resource "azurerm_subnet" "assets_subnet" {
-  name                 = "assets-subnet"
+  name                 = "${var.app_name_prefix}-app-subnet"
   resource_group_name  = azurerm_resource_group.assets.name
   virtual_network_name = azurerm_virtual_network.assets_vnet.name
-  address_prefixes     = ["10.0.2.0/24"]
+  address_prefixes     = var.app_subnet_prefix
 
   delegation {
     name = "webappDelegation"
@@ -42,10 +47,10 @@ resource "azurerm_subnet" "assets_subnet" {
 
 # Subnet for MySQL flexible server
 resource "azurerm_subnet" "mysql_flexible_server_subnet" {
-  name                 = "mysql-flexible-server-subnet"
+  name                 = "${var.app_name_prefix}-mysql-subnet"
   resource_group_name  = azurerm_resource_group.assets.name
   virtual_network_name = azurerm_virtual_network.assets_vnet.name
-  address_prefixes     = ["10.0.3.0/24"]
+  address_prefixes     = var.mysql_subnet_prefix
   delegation {
     name = "mysqlDelegation"
     service_delegation {
@@ -57,55 +62,75 @@ resource "azurerm_subnet" "mysql_flexible_server_subnet" {
 
 # Key Vault
 resource "azurerm_key_vault" "assets_inventory_credentials" {
-  name                        = "assets-inventory-creds"
+  name                        = local.key_vault_name
   location                    = azurerm_resource_group.assets.location
   resource_group_name         = azurerm_resource_group.assets.name
   tenant_id                   = data.azurerm_client_config.current.tenant_id
-  sku_name                    = "standard"
-  soft_delete_retention_days  = 7
-  purge_protection_enabled    = false
+  sku_name                    = var.key_vault_sku
+  soft_delete_retention_days  = var.key_vault_soft_delete_retention_days
+  purge_protection_enabled    = var.key_vault_purge_protection_enabled
+  tags                        = var.tags
+
+  # Grant access to the current service principal/user running Terraform
+  access_policy {
+    tenant_id = data.azurerm_client_config.current.tenant_id
+    object_id = data.azurerm_client_config.current.object_id
+
+    secret_permissions = [
+      "Get",
+      "List",
+      "Set",
+      "Delete",
+      "Purge",
+      "Recover"
+    ]
+  }
 }
 
 # Key Vault Secrets
+# Note: These secrets must be created manually in the Key Vault before running this Terraform
 data "azurerm_key_vault_secret" "db_admin_password" {
-  name         = "db-admin-password"
+  name         = var.keyvault_secret_db_password
   key_vault_id = azurerm_key_vault.assets_inventory_credentials.id
+  depends_on   = [azurerm_key_vault.assets_inventory_credentials]
 }
 
 data "azurerm_key_vault_secret" "app_key" {
-  name         = "AppKey"
+  name         = var.keyvault_secret_app_key
   key_vault_id = azurerm_key_vault.assets_inventory_credentials.id
+  depends_on   = [azurerm_key_vault.assets_inventory_credentials]
 }
 
 data "azurerm_key_vault_secret" "sendgrid_api_key" {
-  name         = "SendGridApiKey"
+  name         = var.keyvault_secret_sendgrid_api_key
   key_vault_id = azurerm_key_vault.assets_inventory_credentials.id
+  depends_on   = [azurerm_key_vault.assets_inventory_credentials]
 }
 
 # MySQL Flexible Server
 resource "azurerm_mysql_flexible_server" "assets_inventory_db" {
-  name                   = "assets-inventory-flexible-server"
+  name                   = "${var.app_name_prefix}-mysql-${random_id.suffix.hex}"
   resource_group_name    = azurerm_resource_group.assets.name
   location               = azurerm_resource_group.assets.location
-  administrator_login    = "assetsadmin"
+  administrator_login    = var.mysql_admin_username
   administrator_password = data.azurerm_key_vault_secret.db_admin_password.value
-  tags                   = {}
-  zone                   = "1"
-  sku_name               = "B_Standard_B1ms"
+  tags                   = var.tags
+  zone                   = var.mysql_zone
+  sku_name               = var.mysql_sku_name
   
   storage {
-    iops    = 360
-    size_gb = 20
+    iops    = var.mysql_storage_iops
+    size_gb = var.mysql_storage_size_gb
   }
   
-  version = "8.0.21"
+  version = var.mysql_version
   
   delegated_subnet_id = azurerm_subnet.mysql_flexible_server_subnet.id
 }
 
 # MySQL Flexible Database
 resource "azurerm_mysql_flexible_database" "snipeit_db" {
-  name                = "snipeit"
+  name                = var.mysql_database_name
   resource_group_name = azurerm_mysql_flexible_server.assets_inventory_db.resource_group_name
   server_name         = azurerm_mysql_flexible_server.assets_inventory_db.name
   charset             = "utf8mb4"
@@ -115,42 +140,38 @@ resource "azurerm_mysql_flexible_database" "snipeit_db" {
 
 # Storage Account
 resource "azurerm_storage_account" "snipeit_storage_account" {
-  name                     = "assetsinventoryecuad"
+  name                     = local.storage_account_name
   resource_group_name      = azurerm_resource_group.assets.name
   location                 = azurerm_resource_group.assets.location
-  account_tier             = "Standard"
-  account_replication_type = "GRS"
+  account_tier             = var.storage_account_tier
+  account_replication_type = var.storage_account_replication_type
+  tags                     = var.tags
 }
 
 # Storage Share for Snipe IT
 resource "azurerm_storage_share" "snipeit" {
   name                 = "snipeit"
   storage_account_name = azurerm_storage_account.snipeit_storage_account.name
-  quota                = 50
+  quota                = var.storage_share_quota
 }
 
 # Storage Share Logs for Snipe IT
 resource "azurerm_storage_share" "snipeit_logs" {
   name                 = "snipeit-logs"
   storage_account_name = azurerm_storage_account.snipeit_storage_account.name
-  quota                = 50
+  quota                = var.storage_share_quota
 }
 
 
 # DigiCertGlobalRootCA.crt.pem DB certificate to File Share
-variable "certificate_base64" {
-  default = <<-EOT
-LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURyekNDQXBlZ0F3SUJBZ0lRQ0R2Z1ZwQkNSckdoZFdySldaSEhTakFOQmdrcWhraUc5dzBCQVFVRkFEQmgKTVFzd0NRWURWUVFHRXdKVlV6RVZNQk1HQTFVRUNoTU1SR2xuYVVObGNuUWdTVzVqTVJrd0Z3WURWUVFMRXhCMwpkM2N1WkdsbmFXTmxjblF1WTI5dE1TQXdIZ1lEVlFRREV4ZEVhV2RwUTJWeWRDQkhiRzlpWVd3Z1VtOXZkQ0JEClFUQWVGdzB3TmpFeE1UQXdNREF3TURCYUZ3MHpNVEV4TVRBd01EQXdNREJhTUdFeEN6QUpCZ05WQkFZVEFsVlQKTVJVd0V3WURWUVFLRXd4RWFXZHBRMlZ5ZENCSmJtTXhHVEFYQmdOVkJBc1RFSGQzZHk1a2FXZHBZMlZ5ZEM1agpiMjB4SURBZUJnTlZCQU1URjBScFoybERaWEowSUVkc2IySmhiQ0JTYjI5MElFTkJNSUlCSWpBTkJna3Foa2lHCjl3MEJBUUVGQUFPQ0FROEFNSUlCQ2dLQ0FRRUE0anZoRVhMZXFLVFRvMWVxVUtLUEMzZVF5YUtsN2hMT2xsc0IKQ1NETUFaT25UakMzVS9kRHhHa0FWNTNpalNMZGh3WkFBSUVKenM0Ymc3L2Z6VHR4UnVMV1pzY0ZzM1luRm85NwpuaDZWZmU2M1NLTUkydGF2ZWd3NUJtVi9TbDBmdkJmNHE3N3VLTmQwZjNwNG1WbUZhRzVjSXpKTHYwN0E2RnB0CjQzQy9keEMvL0FIMmhkbW9SQkJZTXFsMUdOWFJvcjVINGlkcTlKb3orRWtJWUl2VVg3UTZoTCtocWtwTWZUN1AKVDE5c2RsNmdTemVSbnR3aTVtM09GQnFPYXN2K3piTVVaQmZIV3ltZU1yL3k3dnJUQzBMVXE3ZEJNdG9NMU8vNApnZFc3alZnL3RSdm9TU2lpY05veEJOMzNzaGJ5VEFwT0I2anRTajFldFgramtNT3ZKd0lEQVFBQm8yTXdZVEFPCkJnTlZIUThCQWY4RUJBTUNBWVl3RHdZRFZSMFRBUUgvQkFVd0F3RUIvekFkQmdOVkhRNEVGZ1FVQTk1UU5WYlIKVEx0bThLUGlHeHZEbDdJOTBWVXdId1lEVlIwakJCZ3dGb0FVQTk1UU5WYlJUTHRtOEtQaUd4dkRsN0k5MFZVdwpEUVlKS29aSWh2Y05BUUVGQlFBRGdnRUJBTXVjTjZwSUV4SUsrdDFFbkU5U3NQVGZyZ1QxZVhrSW95UVkvRXNyCmhNQXR1ZFhIL3ZUQkgxakx1RzJjZW5Ubm1DbXJFYlhqY0tDaHpVeUltWk9Na1hEaXF3OGN2cE9wLzJQVjVBZGcKMDZPL25Wc0o4ZFdPNDFQMGptUDZQNmZidEdiZlltYlcwVzVCamZJdHRlcDNTcCtkV09JcldjQkFJKzB0S0lKRgpQbmxVa2lhWTRJQklxRGZ2OE5aNVlCYmVyT2dPelc2c1JCYzRMMG5hNFVVK0tyazJVODg2VUFiM0x1akVWMGxzCllTRVkxUVN0ZUR3c09vQnJwK3V2RlJUcDJJbkJ1VGhzNHBGc2l2OWt1WGNsVnpEQUd5U2o0ZHpwMzBkOHRiUWsKQ0FVdzdDMjlDNzlGdjFDNXFmUHJtQUVTcmNpSXhwZzBYNDBLUE1icDFaV1ZiZDQ9Ci0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0K
-EOT
-}
 
 resource "null_resource" "write_cert" {
   triggers = {
-    cert_base64 = var.certificate_base64
+    cert_base64 = var.mysql_ssl_cert_base64
   }
 
   provisioner "local-exec" {
-    command = "echo '${var.certificate_base64}' | base64 --decode > ${path.module}/DigiCertGlobalRootCA.crt.pem"
+    command = "echo '${var.mysql_ssl_cert_base64}' | base64 --decode > ${path.module}/DigiCertGlobalRootCA.crt.pem"
   }
 }
 
@@ -189,11 +210,12 @@ resource "azurerm_mysql_flexible_server_configuration" "sql_invisible_primary_ke
 
 # Service Plan for Azure App Service
 resource "azurerm_service_plan" "assets_inventory_plan" {
-  name                = "assets-inventory-service-plan"
+  name                = "${var.app_name_prefix}-plan-${random_id.suffix.hex}"
   location            = azurerm_resource_group.assets.location
   resource_group_name = azurerm_resource_group.assets.name
   os_type             = "Linux"
-  sku_name            = "B2"
+  sku_name            = var.app_service_sku
+  tags                = var.tags
 }
 
 # Resources for Azure App Service
@@ -208,9 +230,9 @@ resource "azurerm_linux_web_app" "assets_inventory_app" {
     ftps_state                = "Disabled"
     http2_enabled             = "true"
 
-	application_stack {
-	  docker_image_name   = "index.docker.io/snipe/snipe-it:latest"
-	  }
+    application_stack {
+      docker_image_name   = var.docker_image
+    }
   }
 
   storage_account {
@@ -231,34 +253,38 @@ resource "azurerm_linux_web_app" "assets_inventory_app" {
     mount_path   = "/var/www/html/storage/logs"
   }
 
-  app_settings = {
-    "APP_KEY"                             = data.azurerm_key_vault_secret.app_key.value
-    "APP_URL"                             = local.app_url
-    "APP_TIMEZONE"                        = "America/Vancouver"
-    "APP_ENV"                             = "production"
-    "APP_DEBUG"                           = false
-    "APP_LOCALE"                          = "en-US"
-    "MYSQL_DATABASE"                      = "snipeit"
-    "MYSQL_USER"                          = azurerm_mysql_flexible_server.assets_inventory_db.administrator_login
-    "MYSQL_PASSWORD"                      = data.azurerm_key_vault_secret.db_admin_password.value
-    "DB_CONNECTION"                       = "mysql"
-    "WEBSITES_ENABLE_APP_SERVICE_STORAGE" = true
-    "MYSQL_PORT_3306_TCP_ADDR"            = azurerm_mysql_flexible_server.assets_inventory_db.fqdn
-    "MYSQL_PORT_3306_TCP_PORT"            = "3306"
-    "DB_SSL_IS_PAAS"                      = true
-    "DB_SSL"                              = true
-    "DB_SSL_CA_PATH"                      = "/var/lib/snipeit/DigiCertGlobalRootCA.crt.pem"
-    "MAIL_DRIVER"                         = "smtp"
-    "MAIL_ENV_ENCRYPTION"                 = "tcp"
-    "MAIL_PORT_587_TCP_ADDR"              = "smtp.sendgrid.net"
-    "MAIL_PORT_587_TCP_PORT"              = "587"
-    "MAIL_ENV_USERNAME"                   = "apikey"
-    "MAIL_ENV_PASSWORD"                   = data.azurerm_key_vault_secret.sendgrid_api_key.value
-    "MAIL_ENV_FROM_ADDR"                  = "assetsadmins@company.com"
-    "MAIL_ENV_FROM_NAME"                  = "Assets Admins"
-    "SCIM_STANDARDS_COMPLIANCE"           = true
-    "SCIM_TRACE"                          = false
-  }
+  app_settings = merge(
+    {
+      "APP_KEY"                             = data.azurerm_key_vault_secret.app_key.value
+      "APP_URL"                             = var.app_url
+      "APP_TIMEZONE"                        = var.app_timezone
+      "APP_ENV"                             = var.environment
+      "APP_DEBUG"                           = var.app_debug
+      "APP_LOCALE"                          = var.app_locale
+      "MYSQL_DATABASE"                      = var.mysql_database_name
+      "MYSQL_USER"                          = azurerm_mysql_flexible_server.assets_inventory_db.administrator_login
+      "MYSQL_PASSWORD"                      = data.azurerm_key_vault_secret.db_admin_password.value
+      "DB_CONNECTION"                       = "mysql"
+      "WEBSITES_ENABLE_APP_SERVICE_STORAGE" = true
+      "MYSQL_PORT_3306_TCP_ADDR"            = azurerm_mysql_flexible_server.assets_inventory_db.fqdn
+      "MYSQL_PORT_3306_TCP_PORT"            = "3306"
+      "DB_SSL_IS_PAAS"                      = true
+      "DB_SSL"                              = true
+      "DB_SSL_CA_PATH"                      = "/var/lib/snipeit/DigiCertGlobalRootCA.crt.pem"
+      "SCIM_STANDARDS_COMPLIANCE"           = var.scim_standards_compliance
+      "SCIM_TRACE"                          = var.scim_trace
+    },
+    var.sendgrid_enabled ? {
+      "MAIL_DRIVER"             = "smtp"
+      "MAIL_ENV_ENCRYPTION"     = "tcp"
+      "MAIL_PORT_587_TCP_ADDR"  = "smtp.sendgrid.net"
+      "MAIL_PORT_587_TCP_PORT"  = "587"
+      "MAIL_ENV_USERNAME"       = "apikey"
+      "MAIL_ENV_PASSWORD"       = data.azurerm_key_vault_secret.sendgrid_api_key.value
+      "MAIL_ENV_FROM_ADDR"      = var.mail_from_address
+      "MAIL_ENV_FROM_NAME"      = var.mail_from_name
+    } : {}
+  )
 
   https_only = true
 }
@@ -281,9 +307,10 @@ resource "azurerm_network_security_rule" "allow_mysql_from_vnet" {
 
 # Control inbound and outbound network traffic to resources in the vnet
 resource "azurerm_network_security_group" "assets_vnet_nsg" {
-  name                = "assets-vnet-nsg"
+  name                = "${var.app_name_prefix}-nsg"
   location            = azurerm_resource_group.assets.location
   resource_group_name = azurerm_resource_group.assets.name
+  tags                = var.tags
 
   security_rule {
     name                       = "allow-https"
@@ -303,10 +330,10 @@ resource "azurerm_network_security_group" "assets_vnet_nsg" {
     direction                  = "Inbound"
     access                     = "Allow"
     protocol                   = "Tcp"
-    source_port_range          = "*" // Any source port
-    destination_port_range     = "3306" // The MySQL port
-    source_address_prefix      = "10.0.2.0/24" // The subnet of your App Service
-    destination_address_prefix = "10.0.3.0/24" // The subnet of your MySQL server
+    source_port_range          = "*"
+    destination_port_range     = "3306"
+    source_address_prefix      = var.app_subnet_prefix[0]
+    destination_address_prefix = var.mysql_subnet_prefix[0]
   }
 }
 
